@@ -21,7 +21,7 @@ byte relayPin[4] = { 2, 3, 4, 5};
 //D3 -> RELAY2
 //D4 -> RELAY3
 //D5 -> RELAY4
- 
+
 void setup() {
   Serial.begin(9600);
     // Some information indicates the ethernnet module likes to take time to boot.
@@ -70,111 +70,120 @@ void loop() {
 }
 
 void parseResponse(byte relayStates[]) {
-  String now = NULL;
-  String summary = NULL;
-  String dtstart = NULL;
-  String dtend = NULL;
-  String line = "";
+  char now[64] = {'\0'};
+  char dtstart[64] = {'\0'};
+  char dtend[64] = {'\0'};
+  char summary[1024] = {'\0'};
+  char line[1024] = {'\0'};
+  int lineIndex = 0;
   
   // The server will close it's side of the connection when it is finished transferring data.
   while (client.connected()) {
     // It's possible that there is still data to come, but it is not yet ready to read.
     while (client.available()) {
       while (char c = client.read()) {
-        if (c == '\n') {
-          if (line.startsWith("END:VCALENDAR")) {
+        if (c == '\n' || c == '\r') {
+          line[lineIndex] = '\0';
+          if (strstr(line, "END:VCALENDAR")) {
             return;
-          } else if (now == NULL && line.startsWith("Date:")) {
-            now = parseHttpDate(line.substring(6, line.length() - 1));
-          } else if (line.startsWith("BEGIN:VEVENT")) {
-            summary = NULL;
-            dtstart = NULL;
-            dtend = NULL;
-          } else if (line.startsWith("END:VEVENT")) {
+          } else if (now == NULL && strstr(line, "Date:") == line) {
+            parseHttpDate(now, line + 6);
+          } else if (strstr(line, "BEGIN:VEVENT") == line) {
+            summary[0] = '\0';
+            dtstart[0] = '\0';
+            dtend[0] = '\0';
+          } else if (strstr(line, "END:VEVENT") == line) {
             // Parse event
             int zone = -1;
-            if (summary.indexOf("zone0") != -1) {
+            if (strstr(summary, "zone0") != NULL) {
               zone = 0;
-            } else if (summary.indexOf("zone1") != -1) {
+            } else if (strstr(summary, "zone1") != NULL) {
               zone = 1;
-            } else if (summary.indexOf("zone2") != -1) {
+            } else if (strstr(summary, "zone2") != NULL) {
               zone = 2;
-            } else if (summary.indexOf("zone3") != -1) {
+            } else if (strstr(summary, "zone3") != NULL) {
               zone = 3;
             }
             
-            if (zone != -1 && dtstart <= now && dtend > now) {
+            if (zone != -1 && strcmp(dtstart, now) <= 0 && strcmp(dtend, now) >= 0) {
               relayStates[zone] = HIGH;
             }
-          } else if (line.startsWith("DTSTART:")) {
-            dtstart = parseVCalDate(line.substring(8, line.length() - 1));
-          } else if (line.startsWith("DTEND:")) {
-            dtend = parseVCalDate(line.substring(6, line.length() - 1));
-          } else if (line.startsWith("SUMMARY:")) {
-            summary = line.substring(8, line.length() - 1);
+          } else if (strstr(line, "DTSTART:") == line) {
+            strcpy(dtstart, line + 8);
+          } else if (strstr(line, "DTEND:") == line) {
+            strcpy(dtend, line + 6);
+          } else if (strstr(line, "SUMMARY:") == line) {
+            strcpy(summary, line + 8);
           }
-          line = "";
+          lineIndex = 0;
+          line[lineIndex] = '\0';
         } else {
-          line += c;
+          line[lineIndex++] = c;
         }
       }
     }
   }
 }
 
-String parseVCalDate(String dt) {
-  return dt;
-}
-
-String parseHttpDate(String dt) {
-  // RFC 822 date format is
+void parseHttpDate(char *now, char *line) {
+  // Input line is in RFC 822 date format:
   // DOM, [D]D MMM YYYY hh:mm:ss GMT
-  int prevSplit = dt.indexOf(' ') + 1;
-  int nextSplit = dt.indexOf(' ', prevSplit);
-  String DD = "0" + dt.substring(prevSplit, nextSplit);
-  DD = DD.substring(DD.length() - 2, DD.length());
-  prevSplit = nextSplit + 1;
-  nextSplit = dt.indexOf(' ', prevSplit);
-  String MM = dt.substring(prevSplit, nextSplit);
-  if (MM.equalsIgnoreCase("JAN")) {
-    MM = "01";
-  } else if (MM.equalsIgnoreCase("FEB")) {
-    MM = "02";
-  } else if (MM.equalsIgnoreCase("MAR")) {
-    MM = "03";
-  } else if (MM.equalsIgnoreCase("APR")) {
-    MM = "04";
-  } else if (MM.equalsIgnoreCase("MAY")) {
-    MM = "05";
-  } else if (MM.equalsIgnoreCase("JUN")) {
-    MM = "06";
-  } else if (MM.equalsIgnoreCase("JUL")) {
-    MM = "07";
-  } else if (MM.equalsIgnoreCase("AUG")) {
-    MM = "08";
-  } else if (MM.equalsIgnoreCase("SEP")) {
-    MM = "09";
-  } else if (MM.equalsIgnoreCase("OCT")) {
-    MM = "10";
-  } else if (MM.equalsIgnoreCase("NOV")) {
-    MM = "11";
-  } else if (MM.equalsIgnoreCase("DEC")) {
-    MM = "12";
+  // Final result will look like:
+  // YYYYMMDDThhmmssZ
+  now[8] = 'T';
+  now[14] = 'Z';
+  now[15] = '\0';
+  const char *splitOn = " :";
+  // Retrieves DOM, which we discard.
+  char *tok = strtok(line, splitOn);
+  // Retrieves [D]D, which we might have to pad.
+  tok = strtok(NULL, splitOn);
+  if (strlen(tok) == 1) {
+    now[6] = '0';
+    now[7] = tok[0];
+  } else {
+    now[6] = tok[0];
+    now[7] = tok[1];
   }
-  prevSplit = nextSplit + 1;
-  nextSplit = dt.indexOf(' ', prevSplit);
-  String YY = dt.substring(prevSplit, nextSplit);
-  prevSplit = nextSplit + 1;
-  nextSplit = dt.indexOf(':', prevSplit);
-  String hh = dt.substring(prevSplit, nextSplit);
-  prevSplit = nextSplit + 1;
-  nextSplit = dt.indexOf(':', prevSplit);
-  String mm = dt.substring(prevSplit, nextSplit);
-  prevSplit = nextSplit + 1;
-  nextSplit = dt.indexOf(' ', prevSplit);
-  String ss = dt.substring(prevSplit, nextSplit);
-  String ret = YY + MM + DD + "T" + hh + mm + ss + "Z";
-  return ret;
+  // Retrieves MMM, which we have to convert to numeric.
+  tok = strtok(NULL, splitOn);
+  const char months[][4] = {"jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"};
+  for (int i = 0; i < 12; i++) {
+    for (int j = 0; j <= strlen(tok); j++) {
+      if (j == strlen(tok)) {
+        // We have a match.
+        char MM[3] = {'\0'};
+        itoa(i + 1, MM, 10);
+        if (strlen(MM) == 1) {
+          now[4] = '0';
+          now[5] = MM[0];
+        } else {
+          now[4] = MM[0];
+          now[5] = MM[1];
+        }
+      } else if (tolower(tok[j]) != months[i][j]) {
+        break;
+      }
+    }
+  }
+  // Retrieves YYYY
+  tok = strtok(NULL, splitOn);
+  now[0] = tok[0];
+  now[1] = tok[1];
+  now[2] = tok[2];
+  now[3] = tok[3];
+  // Retrieves hh
+  tok = strtok(NULL, splitOn);
+  now[9] = tok[0];
+  now[10] = tok[1];
+  // Retrieves mm
+  tok = strtok(NULL, splitOn);
+  now[11] = tok[0];
+  now[12] = tok[1];
+  // Retrieves ss
+  tok =  strtok(NULL, splitOn);
+  now[13] = tok[0];
+  now[14] = tok[1];
 }
 
 // this method makes a HTTP connection to the server:
