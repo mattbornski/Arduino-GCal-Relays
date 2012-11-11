@@ -4,7 +4,8 @@
 #include <EthernetClient.h>
 #include <Dhcp.h>
 
-String CALENDAR_FEED_URL = "https://google.com/your calendars private vcal/ics format feed here";
+#define CALENDAR_FEED_URL "https://google.com/your calendars private vcal/ics format feed here"
+#define CALENDAR_FEED_URL_REQUEST_HEADERS "GET /" CALENDAR_FEED_URL " HTTP/1.1\n" "Host: proxy.bornski.com\n" "User-Agent: arduino-ethernet\n" "Connection: close\n"
 
 byte myMac[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x66 };
 IPAddress myIp(192, 168, 1, 66);
@@ -14,7 +15,7 @@ EthernetClient client;
 char server[] = "proxy.bornski.com";
 
 unsigned long lastConnectionTime = 0;          // last time you connected to the server, in milliseconds
-const unsigned long postingInterval = 60*1000;  // delay between updates, in milliseconds
+const unsigned long requestInterval = 60*1000;  // delay between updates, in milliseconds
 
 // D2 -> RELAY1
 // D3 -> RELAY2
@@ -29,6 +30,14 @@ void heartbeat() {
   delay(300);
   pinMode(pulsePin, INPUT);
 }
+
+// State which we do not wish to continuously allocate/deallocate.
+char now[64] = {'\0'};
+char dtstart[64] = {'\0'};
+char dtend[64] = {'\0'};
+char line[256] = {'\0'};
+int lineIndex = 0;
+boolean zones[4];
 
 void setup() {
   heartbeat();
@@ -58,75 +67,89 @@ void setup() {
 
 void loop() {
   // If the designated interval has passed since you last connected, then connect again.
-  if (((millis() - lastConnectionTime) > postingInterval) || (lastConnectionTime == 0)) {
-    httpRequest();
-    
-    byte relayStates[4] = {LOW, LOW, LOW, LOW};
-    parseResponse(relayStates);
-    
-    for (int i = 0; i < 4; i++) {
-      digitalWrite(relayPin[i], relayStates[i]);
-    }
-    
-    // Flush all remaining data
-    while (client.connected()) {
-      while (client.available()) {
-        client.read();
+  if (((millis() - lastConnectionTime) > requestInterval) || (lastConnectionTime == 0)) {
+    if (httpRequest()) {
+      byte relayStates[4] = {LOW, LOW, LOW, LOW};
+      parseResponse(relayStates);
+      
+      for (int i = 0; i < 4; i++) {
+        digitalWrite(relayPin[i], relayStates[i]);
       }
+      
+      // Flush all remaining data
+      while (client.connected()) {
+        while (client.available()) {
+          client.read();
+        }
+      }
+      
+      // Terminate our half of the connection.
+      client.stop();
     }
-    // Terminate our half of the connection.
-    client.stop();
   }
 }
 
 void parseResponse(byte relayStates[]) {
-  char now[64] = {'\0'};
-  char dtstart[64] = {'\0'};
-  char dtend[64] = {'\0'};
-  char summary[1024] = {'\0'};
-  char line[1024] = {'\0'};
-  int lineIndex = 0;
+  Serial.println("Parsing response");
   
   // The server will close it's side of the connection when it is finished transferring data.
   while (client.connected()) {
     // It's possible that there is still data to come, but it is not yet ready to read.
     while (client.available()) {
       while (char c = client.read()) {
-        if (c == '\n' || c == '\r') {
+        if (c == '\n' || c == '\r' || lineIndex == 255) {
           line[lineIndex] = '\0';
           if (strstr(line, "END:VCALENDAR")) {
             // Send heartbeat after we've successfully parsed.
             // This way we know that most of the flow is working.
             heartbeat();
-            return;
-          } else if (now == NULL && strstr(line, "Date:") == line) {
-            parseHttpDate(now, line + 6);
-          } else if (strstr(line, "BEGIN:VEVENT") == line) {
-            summary[0] = '\0';
+
+            // Reset state for next time
+            now[0] = '\0';
             dtstart[0] = '\0';
             dtend[0] = '\0';
-          } else if (strstr(line, "END:VEVENT") == line) {
-            // Parse event
-            int zone = -1;
-            if (strstr(summary, "zone0") != NULL) {
-              zone = 0;
-            } else if (strstr(summary, "zone1") != NULL) {
-              zone = 1;
-            } else if (strstr(summary, "zone2") != NULL) {
-              zone = 2;
-            } else if (strstr(summary, "zone3") != NULL) {
-              zone = 3;
-            }
+            line[0] = '\0';
+            lineIndex = 0;
             
-            if (zone != -1 && strcmp(dtstart, now) <= 0 && strcmp(dtend, now) >= 0) {
-              relayStates[zone] = HIGH;
+            return;
+          } else if (strstr(line, "Date:") == line) {
+            parseHttpDate(now, line + 6);
+          } else if (strstr(line, "BEGIN:VEVENT") == line) {
+            // New event.  Reset the per-event parsing state.
+            dtstart[0] = '\0';
+            dtend[0] = '\0';
+            for (int i = 0; i < 4; i++) {
+              zones[i] = false;
+            }
+          } else if (strstr(line, "END:VEVENT") == line) {
+            // End of the event.  If the timestamps are right,
+            // then OR any of the found zones into the desired
+            // zone state.
+            if (strcmp(dtstart, now) <= 0 && strcmp(dtend, now) >= 0) {
+              for (int i = 0; i < 4; i++) {
+                if (zones[i]) {
+                  relayStates[i] = HIGH;
+                }
+              }
             }
           } else if (strstr(line, "DTSTART:") == line) {
             strcpy(dtstart, line + 8);
           } else if (strstr(line, "DTEND:") == line) {
             strcpy(dtend, line + 6);
           } else if (strstr(line, "SUMMARY:") == line) {
-            strcpy(summary, line + 8);
+            // Parse summary line for any zones mentioned.
+            if (strstr(line, "zone0") != NULL) {
+              zones[0] = true;
+            }
+            if (strstr(line, "zone1") != NULL) {
+              zones[1] = true;
+            }
+            if (strstr(line, "zone2") != NULL) {
+              zones[2] = true;
+            }
+            if (strstr(line, "zone3") != NULL) {
+              zones[3] = true;
+            }
           }
           lineIndex = 0;
           line[lineIndex] = '\0';
@@ -200,23 +223,23 @@ void parseHttpDate(char *now, char *line) {
 }
 
 // this method makes a HTTP connection to the server:
-void httpRequest() {
-  Serial.println("connecting...");
+boolean httpRequest() {
+  Serial.println("Connecting to host");
   // if there's a successful connection:
   if (client.connect(server, 80)) {
+    Serial.println("Requesting URL");
     // send the HTTP GET request:
-    client.println("GET /" + CALENDAR_FEED_URL + " HTTP/1.1");
-    client.println("Host: proxy.bornski.com");
-    client.println("User-Agent: arduino-ethernet");
-    client.println("Connection: close");
-    client.println();
-
+    client.println(CALENDAR_FEED_URL_REQUEST_HEADERS);
+    
     // note the time that the connection was made:
     lastConnectionTime = millis();
-    Serial.println("connected");
+    
+    return true;
   } else {
     // if you couldn't make a connection:
     Serial.println("Connection failed");
     client.stop();
+    
+    return false;
   }
 }
