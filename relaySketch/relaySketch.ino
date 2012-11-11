@@ -14,15 +14,25 @@ EthernetClient client;
 char server[] = "proxy.bornski.com";
 
 unsigned long lastConnectionTime = 0;          // last time you connected to the server, in milliseconds
-const unsigned long postingInterval = 10*1000;  // delay between updates, in milliseconds
+const unsigned long postingInterval = 60*1000;  // delay between updates, in milliseconds
 
+// D2 -> RELAY1
+// D3 -> RELAY2
+// D4 -> RELAY3
+// D5 -> RELAY4
 byte relayPin[4] = { 2, 3, 4, 5};
-//D2 -> RELAY1
-//D3 -> RELAY2
-//D4 -> RELAY3
-//D5 -> RELAY4
+// D8 -> Heartbeat for watchdog timer
+byte pulsePin = 8;
+
+void heartbeat() {
+  pinMode(pulsePin, OUTPUT);
+  delay(300);
+  pinMode(pulsePin, INPUT);
+}
 
 void setup() {
+  heartbeat();
+  
   Serial.begin(9600);
     // Some information indicates the ethernnet module likes to take time to boot.
   delay(1000);
@@ -85,6 +95,9 @@ void parseResponse(byte relayStates[]) {
         if (c == '\n' || c == '\r') {
           line[lineIndex] = '\0';
           if (strstr(line, "END:VCALENDAR")) {
+            // Send heartbeat after we've successfully parsed.
+            // This way we know that most of the flow is working.
+            heartbeat();
             return;
           } else if (now == NULL && strstr(line, "Date:") == line) {
             parseHttpDate(now, line + 6);
