@@ -4,6 +4,7 @@
 #include <EthernetClient.h>
 #include <Dhcp.h>
 
+// Determine your private Google calendar feed URL and fill in here:
 #define CALENDAR_FEED_URL "https://google.com/your calendars private vcal/ics format feed here"
 #define CALENDAR_FEED_URL_REQUEST_HEADERS "GET /" CALENDAR_FEED_URL " HTTP/1.1\n" "Host: proxy.bornski.com\n" "User-Agent: arduino-ethernet\n" "Connection: close\n"
 
@@ -14,8 +15,10 @@ IPAddress myDns(192, 168, 1, 1);
 EthernetClient client;
 char server[] = "proxy.bornski.com";
 
-unsigned long lastConnectionTime = 0;          // last time you connected to the server, in milliseconds
-const unsigned long requestInterval = 60*1000;  // delay between updates, in milliseconds
+unsigned long lastConnectionTime = 0;                  // last time you connected to the server, in milliseconds
+static const unsigned long connectionInterval = 60000; // delay between updates, in milliseconds
+unsigned long lastHeartbeatTime = 0;                   // last time you sent a heartbeat pulse, in milliseconds
+static const unsigned long heartbeatInterval = 10000;  // delay between heartbeat pulses, in milliseconds
 
 // D2 -> RELAY1
 // D3 -> RELAY2
@@ -25,17 +28,40 @@ byte relayPin[4] = { 2, 3, 4, 5};
 // D8 -> Heartbeat for watchdog timer
 byte pulsePin = 8;
 
+typedef struct zoneControl {
+  byte relay;
+  const char *keyword;
+} zoneControl;
+
+// garden -> relay 3
+// Don't have too many keywords, they consume RAM
+static const zoneControl zoneControlKeywords[] = {
+  { relay: 0, keyword: "left lawn" },
+  { relay: 0, keyword: "left grass" },
+  
+  { relay: 1, keyword: "right lawn" },
+  { relay: 1, keyword: "right grass" },
+  
+  { relay: 2, keyword: "roses" },
+  
+  { relay: 3, keyword: "garden" },
+};
+
+
+
 void heartbeat() {
   pinMode(pulsePin, OUTPUT);
+  Serial.println("heartbeat");
   delay(300);
   pinMode(pulsePin, INPUT);
+  lastHeartbeatTime = millis();
 }
 
 // State which we do not wish to continuously allocate/deallocate.
-char now[64] = {'\0'};
-char dtstart[64] = {'\0'};
-char dtend[64] = {'\0'};
-char line[256] = {'\0'};
+char now[32] = {'\0'};
+char dtstart[32] = {'\0'};
+char dtend[32] = {'\0'};
+char line[128] = {'\0'};
 int lineIndex = 0;
 boolean zones[4];
 
@@ -66,13 +92,36 @@ void setup() {
 }
 
 void loop() {
-  // If the designated interval has passed since you last connected, then connect again.
-  if (((millis() - lastConnectionTime) > requestInterval) || (lastConnectionTime == 0)) {
+  boolean needHeartbeat = (millis() - lastHeartbeatTime) > heartbeatInterval;
+  boolean needConnection = ((millis() - lastConnectionTime) > connectionInterval) || (lastConnectionTime == 0);
+  if (needHeartbeat || needConnection) {
+    Serial.print("Last heartbeat: ");
+    Serial.print(millis() - lastHeartbeatTime);
+    Serial.print(" / ");
+    Serial.print(heartbeatInterval);
+    Serial.print(" -> ");
+    Serial.println(needHeartbeat ? "heartbeat" : "nothing");
+    Serial.print("Last connection: ");
+    Serial.print(millis() - lastConnectionTime);
+    Serial.print(" / ");
+    Serial.print(connectionInterval);
+    Serial.print(" -> ");
+    Serial.println(needConnection ? "request" : "nothing");
+  }
+  if (needHeartbeat) {
+    // If the designated interval has passed since you last connected, then connect again.
+    heartbeat();
+  }
+  if (needConnection) {
     if (httpRequest()) {
       byte relayStates[4] = {LOW, LOW, LOW, LOW};
       parseResponse(relayStates);
       
       for (int i = 0; i < 4; i++) {
+        Serial.print("Zone #");
+        Serial.print(i);
+        Serial.print(" set ");
+        Serial.println((relayStates[i] ? "high": "low"));
         digitalWrite(relayPin[i], relayStates[i]);
       }
       
@@ -90,20 +139,15 @@ void loop() {
 }
 
 void parseResponse(byte relayStates[]) {
-  Serial.println("Parsing response");
-  
   // The server will close it's side of the connection when it is finished transferring data.
   while (client.connected()) {
     // It's possible that there is still data to come, but it is not yet ready to read.
     while (client.available()) {
       while (char c = client.read()) {
+//        Serial.print(c);
         if (c == '\n' || c == '\r' || lineIndex == 255) {
           line[lineIndex] = '\0';
           if (strstr(line, "END:VCALENDAR")) {
-            // Send heartbeat after we've successfully parsed.
-            // This way we know that most of the flow is working.
-            heartbeat();
-
             // Reset state for next time
             now[0] = '\0';
             dtstart[0] = '\0';
@@ -132,23 +176,25 @@ void parseResponse(byte relayStates[]) {
                 }
               }
             }
+            
+            // If we get a long calendar it can take us a while to parse it out.
+            if ((millis() - lastHeartbeatTime) > heartbeatInterval) {
+              heartbeat();
+            }
           } else if (strstr(line, "DTSTART:") == line) {
             strcpy(dtstart, line + 8);
           } else if (strstr(line, "DTEND:") == line) {
             strcpy(dtend, line + 6);
           } else if (strstr(line, "SUMMARY:") == line) {
+            Serial.println("Found summary, parsing for zones...");
+            Serial.println(line);
             // Parse summary line for any zones mentioned.
-            if (strstr(line, "zone0") != NULL) {
-              zones[0] = true;
-            }
-            if (strstr(line, "zone1") != NULL) {
-              zones[1] = true;
-            }
-            if (strstr(line, "zone2") != NULL) {
-              zones[2] = true;
-            }
-            if (strstr(line, "zone3") != NULL) {
-              zones[3] = true;
+            for (int zcIndex = 0; zcIndex < sizeof(zoneControlKeywords) / sizeof(zoneControl); zcIndex++) {
+              if (strstr(line, zoneControlKeywords[zcIndex].keyword) != NULL) {
+                Serial.print("Setting zone ");
+                Serial.println(zoneControlKeywords[zcIndex].relay);
+                zones[zoneControlKeywords[zcIndex].relay] = true;
+              }
             }
           }
           lineIndex = 0;
@@ -217,7 +263,7 @@ void parseHttpDate(char *now, char *line) {
   now[11] = tok[0];
   now[12] = tok[1];
   // Retrieves ss
-  tok =  strtok(NULL, splitOn);
+  tok = strtok(NULL, splitOn);
   now[13] = tok[0];
   now[14] = tok[1];
 }
