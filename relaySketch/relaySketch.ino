@@ -37,10 +37,8 @@ typedef struct zoneControl {
 // Don't have too many keywords, they consume RAM
 static const zoneControl zoneControlKeywords[] = {
   { relay: 0, keyword: "left lawn" },
-  { relay: 0, keyword: "left grass" },
   
   { relay: 1, keyword: "right lawn" },
-  { relay: 1, keyword: "right grass" },
   
   { relay: 2, keyword: "roses" },
   
@@ -108,8 +106,13 @@ void loop() {
     Serial.print(" -> ");
     Serial.println(needConnection ? "request" : "nothing");
   }
-  if (needHeartbeat) {
-    // If the designated interval has passed since you last connected, then connect again.
+  if (needHeartbeat && !needConnection) {
+    // If the designated interval has passed since you sent a heartbeat,
+    // send one again.  This reassures the hardware watchdog that all is
+    // well.  Note that we do not send a heartbeat if you are in a "need
+    // connection" state; this ensures that if we encounter network
+    // trouble that would be solved by a reset, we will let the watchdog
+    // handle that for us.
     heartbeat();
   }
   if (needConnection) {
